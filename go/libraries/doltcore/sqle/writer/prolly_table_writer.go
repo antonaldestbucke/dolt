@@ -55,6 +55,7 @@ type prollyTableWriter struct {
 	sqlSch                 sql.Schema
 	setAutoIncrement       bool
 	targetStaging          bool
+	isDirty                bool
 }
 
 var _ dsess.TableWriter = &prollyTableWriter{}
@@ -173,6 +174,7 @@ func (w *prollyTableWriter) Insert(ctx *sql.Context, sqlRow sql.Row) (err error)
 
 	// TODO: need schema name in ai tracker
 	w.aiTracker.Next(ctx, w.tableName.Name, sqlRow)
+	w.isDirty = true
 	return nil
 }
 
@@ -186,6 +188,7 @@ func (w *prollyTableWriter) Delete(ctx *sql.Context, sqlRow sql.Row) (err error)
 	if err := w.primary.Delete(ctx, sqlRow); err != nil {
 		return err
 	}
+	w.isDirty = true
 	return nil
 }
 
@@ -218,6 +221,7 @@ func (w *prollyTableWriter) Update(ctx *sql.Context, oldRow sql.Row, newRow sql.
 	}
 
 	w.setAutoIncrement = true
+	w.isDirty = true
 	return nil
 }
 
@@ -246,11 +250,13 @@ func (w *prollyTableWriter) AcquireAutoIncrementLock(ctx *sql.Context) (func(), 
 
 // Close implements Closer
 func (w *prollyTableWriter) Close(ctx *sql.Context) error {
+	return w.errEncountered
+	// TODO:
 	// We discard data changes in DiscardChanges, but this doesn't include schema changes, which we don't want to flush
-	if w.errEncountered == nil {
-		return w.flush(ctx)
-	}
-	return nil
+	//if w.errEncountered == nil {
+	//	return w.flush(ctx)
+	//}
+	//return nil
 }
 
 // StatementBegin implements TableWriter.
@@ -319,7 +325,6 @@ func (w *prollyTableWriter) Reset(ctx *sql.Context, sess *prollyWriteSession, tb
 	}
 
 	var newPrimary indexWriter
-
 	var newSecondaries map[string]indexWriter
 	if schema.IsKeyless(sch) {
 		newPrimary, err = getPrimaryKeylessProllyWriter(ctx, tbl, schState)
@@ -348,6 +353,7 @@ func (w *prollyTableWriter) Reset(ctx *sql.Context, sess *prollyWriteSession, tb
 	w.secondary = newSecondaries
 	w.aiCol = schState.AutoIncCol
 	w.flusher = sess
+	w.isDirty = false
 
 	return nil
 }
@@ -397,9 +403,17 @@ func (w *prollyTableWriter) flush(ctx *sql.Context) error {
 		return err
 	}
 
+	var newRoot doltdb.RootValue
 	if w.targetStaging {
-		return w.setter(ctx, w.dbName, ws.StagedRoot())
+		newRoot = ws.StagedRoot()
 	} else {
-		return w.setter(ctx, w.dbName, ws.WorkingRoot())
+		newRoot = ws.WorkingRoot()
 	}
+
+	err = w.setter(ctx, w.dbName, newRoot)
+	if err != nil {
+		return err
+	}
+	w.isDirty = false
+	return nil
 }
