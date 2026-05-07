@@ -39,6 +39,9 @@ type AutoIncrementGetter interface {
 	GetNextAutoIncrementValue(ctx *sql.Context, insertVal interface{}) (uint64, error)
 }
 
+// FLUSH_THRESHOLD is the max number of writes before we force a flush
+const FLUSH_THRESHOLD = 1024
+
 type prollyTableWriter struct {
 	sch                    schema.Schema
 	errEncountered         error
@@ -53,9 +56,9 @@ type prollyTableWriter struct {
 	dbName                 string
 	aiCol                  schema.Column
 	sqlSch                 sql.Schema
+	changes                uint64
 	setAutoIncrement       bool
 	targetStaging          bool
-	isDirty                bool
 }
 
 var _ dsess.TableWriter = &prollyTableWriter{}
@@ -174,7 +177,7 @@ func (w *prollyTableWriter) Insert(ctx *sql.Context, sqlRow sql.Row) (err error)
 
 	// TODO: need schema name in ai tracker
 	w.aiTracker.Next(ctx, w.tableName.Name, sqlRow)
-	w.isDirty = true
+	w.changes++
 	return nil
 }
 
@@ -188,7 +191,7 @@ func (w *prollyTableWriter) Delete(ctx *sql.Context, sqlRow sql.Row) (err error)
 	if err := w.primary.Delete(ctx, sqlRow); err != nil {
 		return err
 	}
-	w.isDirty = true
+	w.changes++
 	return nil
 }
 
@@ -221,7 +224,7 @@ func (w *prollyTableWriter) Update(ctx *sql.Context, oldRow sql.Row, newRow sql.
 	}
 
 	w.setAutoIncrement = true
-	w.isDirty = true
+	w.changes++
 	return nil
 }
 
@@ -250,13 +253,14 @@ func (w *prollyTableWriter) AcquireAutoIncrementLock(ctx *sql.Context) (func(), 
 
 // Close implements Closer
 func (w *prollyTableWriter) Close(ctx *sql.Context) error {
-	return w.errEncountered
-	// TODO:
+	if w.errEncountered != nil {
+		return w.errEncountered
+	}
+	if w.changes < FLUSH_THRESHOLD {
+		return nil
+	}
 	// We discard data changes in DiscardChanges, but this doesn't include schema changes, which we don't want to flush
-	//if w.errEncountered == nil {
-	//	return w.flush(ctx)
-	//}
-	//return nil
+	return w.flush(ctx)
 }
 
 // StatementBegin implements TableWriter.
@@ -353,7 +357,7 @@ func (w *prollyTableWriter) Reset(ctx *sql.Context, sess *prollyWriteSession, tb
 	w.secondary = newSecondaries
 	w.aiCol = schState.AutoIncCol
 	w.flusher = sess
-	w.isDirty = false
+	w.changes = 0
 
 	return nil
 }
@@ -414,6 +418,6 @@ func (w *prollyTableWriter) flush(ctx *sql.Context) error {
 	if err != nil {
 		return err
 	}
-	w.isDirty = false
+	w.changes = 0
 	return nil
 }
