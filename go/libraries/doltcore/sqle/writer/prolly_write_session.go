@@ -275,7 +275,7 @@ func (s *prollyWriteSession) setWorkingSet(ctx *sql.Context, ws *doltdb.WorkingS
 // IsDirty indicates if this prollyWriteSession has pending writes
 func (s *prollyWriteSession) IsDirty() bool {
 	for _, writer := range s.tables {
-		if writer.isDirty {
+		if writer.changes > 0 {
 			return true
 		}
 	}
