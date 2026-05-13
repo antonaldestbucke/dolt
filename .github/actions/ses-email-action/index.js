@@ -1,50 +1,82 @@
+/**
+ * SES Email Action - Main Entry Point
+ *
+ * This GitHub Action sends emails via AWS SES.
+ * It reads inputs from the GitHub Actions environment and
+ * delegates to the core email sending logic.
+ */
+
 const core = require('@actions/core');
-const { SES } = require("@aws-sdk/client-ses");
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+const { buildEmailParams } = require('./dist/index.js');
 
-const fs = require('fs');
+/**
+ * Validates that required inputs are present and non-empty.
+ * @param {string} name - The input name
+ * @param {string} value - The input value
+ * @throws {Error} if the value is empty
+ */
+function requireInput(name, value) {
+  if (!value || value.trim() === '') {
+    throw new Error(`Required input '${name}' is missing or empty`);
+  }
+}
 
-const region = core.getInput('region');
-const version = core.getInput('version');
-const format = core.getInput('format');
-const Template = core.getInput('template');
-const dataFilePath = core.getInput('dataFile');
-const CcAddresses = JSON.parse(core.getInput('ccAddresses'));
-const ToAddresses = JSON.parse(core.getInput('toAddresses'));
-const ReplyToAddresses = JSON.parse(core.getInput('replyToAddresses'));
-const workflowURL = core.getInput('workflowURL');
-const subject = core.getInput('subject');
-const bodyPath = core.getInput('bodyPath');
+/**
+ * Main action entrypoint.
+ * Reads GitHub Actions inputs, constructs SES email params,
+ * and sends the email via AWS SES.
+ */
+async function run() {
+  try {
+    // Read inputs
+    const awsRegion = core.getInput('aws-region') || 'us-east-1';
+    const fromAddress = core.getInput('from');
+    const toAddresses = core.getInput('to');
+    const subject = core.getInput('subject');
+    const body = core.getInput('body');
+    const bodyHtml = core.getInput('body-html');
+    const replyTo = core.getInput('reply-to');
 
-const data = dataFilePath ? fs.readFileSync(dataFilePath, { encoding: 'utf-8' }) : "";
-const body = bodyPath ? fs.readFileSync(bodyPath, { encoding: 'utf-8' }) : "";
+    // Validate required inputs
+    requireInput('from', fromAddress);
+    requireInput('to', toAddresses);
+    requireInput('subject', subject);
 
-const templated = {
-    version,
-    format,
-    results: data,
-    workflowURL,
-    subject,
-    body,
-};
+    if (!body && !bodyHtml) {
+      throw new Error("At least one of 'body' or 'body-html' inputs must be provided");
+    }
 
-// Create sendEmail params
-const params = {
-    Destination: { /* required */
-        CcAddresses,
-        ToAddresses,
-    },
-    Source: 'github-actions-bot@corp.ld-corp.com', /* required */
-    Template,
-    TemplateData: JSON.stringify(templated),
-    ReplyToAddresses,
-};
+    // Parse comma-separated recipient list
+    const toList = toAddresses.split(',').map((addr) => addr.trim()).filter(Boolean);
+    const replyToList = replyTo
+      ? replyTo.split(',').map((addr) => addr.trim()).filter(Boolean)
+      : [];
 
-console.log(params)
+    core.info(`Sending email from '${fromAddress}' to ${toList.length} recipient(s)`);
 
-// Create the promise and SES service object
-const sendPromise = new SES({region}).sendTemplatedEmail(params);
+    // Build the SES email parameters
+    const emailParams = buildEmailParams({
+      from: fromAddress,
+      to: toList,
+      subject,
+      body: body || undefined,
+      bodyHtml: bodyHtml || undefined,
+      replyTo: replyToList.length > 0 ? replyToList : undefined,
+    });
 
-// Handle promise's fulfilled/rejected states
-sendPromise
-    .then((data) => console.log("Successfully sent email:", data.MessageId))
-    .catch((err) => console.error(err, err.stack));
+    // Initialize the SES client
+    const sesClient = new SESClient({ region: awsRegion });
+
+    // Send the email
+    const command = new SendEmailCommand(emailParams);
+    const response = await sesClient.send(command);
+
+    core.info(`Email sent successfully. MessageId: ${response.MessageId}`);
+    core.setOutput('message-id', response.MessageId);
+  } catch (error) {
+    core.setFailed(`Action failed: ${error.message}`);
+  }
+}
+
+run();
